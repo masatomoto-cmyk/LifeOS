@@ -1,0 +1,12 @@
+#!/bin/zsh
+# Qiita のアクセストークンを ~/.config/qiita/token に保存する（入力は画面に表示されない）
+set -e
+
+FILE="$HOME/.config/qiita/token"
+read -rs "t?Qiitaトークンを貼り付けて Enter: "
+echo
+[[ -n $t ]] || { echo "何も入力されませんでした" >&2; exit 1 }
+mkdir -p "${FILE:h}"
+print -r -- "$t" > "$FILE"
+chmod 600 "$FILE"
+echo "保存しました: $FILE"

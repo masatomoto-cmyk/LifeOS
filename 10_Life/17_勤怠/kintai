@@ -1,0 +1,104 @@
+#!/bin/zsh
+# 勤怠記録ツール — 月ごとのCSV（data/YYYY-MM.csv）に1日1行で記録する
+#
+#   kintai in [HH:MM]        出勤（時刻省略で現在時刻）
+#   kintai out [HH:MM]       退勤
+#   kintai break <分>        休憩時間を設定（例: kintai break 60）
+#   kintai note <メモ>       今日のメモ
+#   kintai today             今日の記録を表示
+#   kintai report [YYYY-MM]  月の一覧と合計時間（省略で今月）
+#   kintai edit [YYYY-MM]    CSVを直接開いて修正
+#   kintai pending           カレンダー未反映の日を表示（自動同期タスク用）
+#   kintai synced <日付> <イベントID>  カレンダー反映済みとして記録
+set -e
+
+DIR="${0:A:h}"
+DATA="$DIR/data"
+HEADER="日付,出勤,退勤,休憩(分),メモ"
+SYNC="$DATA/calendar-sync.csv"   # 日付,イベントID,反映時の内容
+TODAY=$(date +%Y-%m-%d)
+NOW=$(date +%H:%M)
+
+csv_for() { echo "$DATA/$1.csv" }
+
+ensure_row() {
+  local file=$(csv_for ${TODAY[1,7]})
+  mkdir -p "$DATA"
+  [[ -f $file ]] || echo "$HEADER" > "$file"
+  grep -q "^$TODAY," "$file" || echo "$TODAY,,,0," >> "$file"
+  echo "$file"
+}
+
+# set_field <列番号> <値> — 今日の行の指定列を書き換える
+set_field() {
+  local file=$(ensure_row) tmp=$(mktemp)
+  awk -F, -v OFS=, -v d="$TODAY" -v c="$1" -v v="$2" \
+    '$1==d { $c=v } { print }' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+check_time() {
+  [[ $1 =~ '^[0-9]{1,2}:[0-9]{2}$' ]] || { echo "時刻は HH:MM で指定してください: $1" >&2; exit 1 }
+}
+
+report() {
+  local file=$(csv_for "$1")
+  [[ -f $file ]] || { echo "$1 の記録はありません"; return }
+  awk -F, '
+    function mins(t,  a) { split(t, a, ":"); return a[1]*60 + a[2] }
+    function hm(m) { return sprintf("%d:%02d", int(m/60), m%60) }
+    NR==1 { printf "%-10s  %5s  %5s  %4s  %6s  %s\n", "日付", "出勤", "退勤", "休憩", "実働", "メモ"; next }
+    {
+      w = ""
+      if ($2 != "" && $3 != "") {
+        m = mins($3) - mins($2); if (m < 0) m += 1440   # 日をまたぐ勤務
+        m -= $4; total += m; days++; w = hm(m)
+      }
+      printf "%-10s  %5s  %5s  %4s  %6s  %s\n", $1, $2, $3, $4, w, $5
+    }
+    END { printf "\n出勤日数: %d日  合計実働: %s\n", days, hm(total) }
+  ' "$file"
+}
+
+# 出退勤がそろっていて、カレンダーに未反映 or 反映後に変更された日を出力
+# 出力: 日付,出勤,退勤,休憩(分),メモ,イベントID（新規は空）
+pending() {
+  [[ -f $SYNC ]] || echo "日付,イベントID,内容" > "$SYNC"
+  local files=("$DATA"/<->-<->.csv(N))
+  (( $#files )) || return 0
+  awk -F, -v OFS=, '
+    NR==FNR { if (FNR > 1) { id[$1]=$2; sig[$1]=$3 } next }
+    FNR==1 { next }
+    $2 != "" && $3 != "" {
+      s = $2 "|" $3 "|" $4 "|" $5
+      if (sig[$1] != s) print $1, $2, $3, $4, $5, id[$1]
+    }
+  ' "$SYNC" "${files[@]}"
+}
+
+# synced <日付> <イベントID> — 今の内容で反映済みとして記録（既存行は置き換え）
+synced() {
+  [[ $1 =~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' && -n $2 ]] || { echo "使い方: kintai synced YYYY-MM-DD <イベントID>" >&2; exit 1 }
+  local file=$(csv_for ${1[1,7]})
+  local row=$(grep "^$1," "$file" 2>/dev/null) || { echo "$1 の記録がありません" >&2; exit 1 }
+  local f=("${(@s:,:)row}")
+  local tmp=$(mktemp)
+  [[ -f $SYNC ]] || echo "日付,イベントID,内容" > "$SYNC"
+  grep -v "^$1," "$SYNC" > "$tmp"
+  echo "$1,$2,$f[2]|$f[3]|$f[4]|$f[5]" >> "$tmp"
+  mv "$tmp" "$SYNC"
+  echo "$1 をカレンダー反映済みにしました"
+}
+
+case "$1" in
+  in)    t=${2:-$NOW}; check_time $t; set_field 2 $t; echo "出勤 $t" ;;
+  out)   t=${2:-$NOW}; check_time $t; set_field 3 $t; echo "退勤 $t" ;;
+  break) [[ $2 =~ '^[0-9]+$' ]] || { echo "分を数字で指定してください" >&2; exit 1 }
+         set_field 4 $2; echo "休憩 ${2}分" ;;
+  note)  shift; set_field 5 "${${*}//,/、}"; echo "メモを保存しました" ;;
+  today) report ${TODAY[1,7]} | awk -v d="$TODAY" 'NR==1 || index($0, d)==1' ;;
+  report) report ${2:-${TODAY[1,7]}} ;;
+  pending) pending ;;
+  synced) synced $2 $3 ;;
+  edit)  ensure_row >/dev/null; open -t "$(csv_for ${2:-${TODAY[1,7]}})" ;;
+  *)     sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

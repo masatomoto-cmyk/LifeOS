@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+# 週報ツール — 1週間の活動をまとめて Qiita に投稿する
+#
+#   qiita draft [YYYY-MM-DD]   その日までの7日間の活動から下書きを作る（省略で今日）
+#   qiita post [下書き]        下書きを Qiita に投稿（投稿済みなら更新）。省略で最新の下書き
+#   qiita post --dry-run       送信内容を表示するだけ
+#   qiita status               下書きと投稿状況の一覧
+#
+# トークンは環境変数 QIITA_TOKEN か ~/.config/qiita/token に置く（write_qiita 権限）
+
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+DIR = Path(__file__).resolve().parent
+DRAFTS = DIR / "drafts"
+POSTED = DIR / "posted.csv"  # 下書きファイル名,記事ID,URL,投稿日時
+CONFIG = DIR / "config.json"
+HOME = Path.home()
+DEV = HOME / "Dev"
+LEARNING = DIR.parent
+TOKEN_FILE = HOME / ".config/qiita/token"
+API = "https://qiita.com/api/v2/items"
+SKIP_DIRS = {".git", "node_modules", ".next", "dist", "build", ".venv", "__pycache__", ".DS_Store"}
+
+DEFAULT_CONFIG = {
+    "tags": ["週報", "個人開発"],
+    "private": True,          # true = 限定共有（URLを知っている人だけ）, false = 全体公開
+    "exclude": [],            # 週報に載せないパス（~/Dev からの相対パスの先頭一致）
+}
+
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG.exists():
+        cfg.update(json.loads(CONFIG.read_text()))
+    return cfg
+
+
+def excluded(rel, cfg):
+    return any(rel == e or rel.startswith(e.rstrip("/") + "/") for e in cfg["exclude"])
+
+
+# ---------- 活動の収集 ----------
+
+def git_repos():
+    for root, dirs, _ in os.walk(DEV, followlinks=False):
+        if ".git" in dirs:
+            yield Path(root)
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+
+def git_commits(start, end, cfg):
+    out = {}
+    for repo in git_repos():
+        rel = str(repo.relative_to(DEV))
+        if excluded(rel, cfg):
+            continue
+        r = subprocess.run(
+            ["git", "-C", repo, "log", "--no-merges", "--all",
+             f"--since={start} 00:00", f"--until={end} 23:59:59",
+             "--date=short", "--pretty=%ad\t%s"],
+            capture_output=True, text=True)
+        lines = [l.split("\t", 1) for l in r.stdout.splitlines() if "\t" in l]
+        if lines:
+            out[project_name(repo)] = sorted(lines)
+    return out
+
+
+def project_name(path):
+    # ~/Dev/21_Web開発/2026_音楽交流アプリ/src → 2026_音楽交流アプリ
+    parts = path.relative_to(DEV).parts
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
+def changed_files(base, start, end, cfg, skip_git=True):
+    """git 管理外で期間中に更新されたファイル（DTM の曲や記事下書きなど）"""
+    lo = datetime.combine(start, datetime.min.time()).timestamp()
+    hi = datetime.combine(end + timedelta(days=1), datetime.min.time()).timestamp()
+    out = {}
+    if not base.exists():
+        return out
+    for root, dirs, files in os.walk(base):
+        if skip_git and ".git" in dirs:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        for f in files:
+            p = Path(root) / f
+            if f.startswith(".") or p.is_symlink():
+                continue
+            rel = str(p.relative_to(base))
+            if excluded(rel, cfg) or rel.startswith("_template/"):
+                continue
+            try:
+                if lo <= p.stat().st_mtime < hi:
+                    group = "/".join(p.parent.relative_to(base).parts[:2]) or "(直下)"
+                    out.setdefault(group, []).append(rel)
+            except OSError:
+                pass
+    return out
+
+
+def readme_logs(start, end, cfg):
+    """各プロジェクト docs/README.md の「- YYYY-MM-DD: 内容」行"""
+    out = {}
+    pat = re.compile(r"^\s*[-*]\s*(\d{4}-\d{2}-\d{2})\s*[:：]\s*(.+)$")
+    for readme in DEV.glob("*/*/docs/README.md"):
+        rel = str(readme.relative_to(DEV))
+        if excluded(rel, cfg):
+            continue
+        for line in readme.read_text(errors="ignore").splitlines():
+            m = pat.match(line)
+            if m and start <= date.fromisoformat(m[1]) <= end:
+                out.setdefault(readme.parents[1].name, []).append((m[1], m[2].strip()))
+    return out
+
+
+# ---------- 下書き ----------
+
+def week_range(end):
+    return end - timedelta(days=6), end
+
+
+def draft_path(end):
+    return DRAFTS / f"{end.isoformat()}_週報.md"
+
+
+def build_body(start, end, cfg):
+    commits = git_commits(start, end, cfg)
+    logs = readme_logs(start, end, cfg)
+    dev_files = changed_files(DEV, start, end, cfg)
+    learn_files = changed_files(LEARNING, start, end, {"exclude": ["35_週報"]})
+
+    s = []
+    s.append(f"{start:%Y/%m/%d}〜{end:%m/%d} の活動記録です。\n")
+    s.append("## 今週のまとめ\n")
+    s.append("<!-- summary -->\n- （ここに今週の振り返りを書く）\n<!-- /summary -->\n")
+
+    s.append("## 開発\n")
+    projects = sorted(set(commits) | set(logs))
+    if not projects:
+        s.append("今週はコミットがありませんでした。\n")
+    for name in projects:
+        s.append(f"### {name}\n")
+        for d, msg in logs.get(name, []):
+            s.append(f"- {d[5:]} {msg}")
+        for d, msg in commits.get(name, []):
+            s.append(f"- {d[5:]} `{msg}`")
+        s.append("")
+
+    if dev_files:
+        s.append("## 制作・更新したファイル\n")
+        for group, files in sorted(dev_files.items()):
+            s.append(f"### {group}\n")
+            for f in sorted(files)[:15]:
+                s.append(f"- {Path(f).name}")
+            if len(files) > 15:
+                s.append(f"- ほか {len(files) - 15} 件")
+            s.append("")
+
+    if learn_files:
+        s.append("## 学習\n")
+        for group, files in sorted(learn_files.items()):
+            for f in sorted(files):
+                s.append(f"- {Path(f).stem}（{group}）")
+        s.append("")
+
+    s.append("## 来週やること\n")
+    s.append("<!-- next -->\n- （来週の予定を書く）\n<!-- /next -->\n")
+    return "\n".join(s)
+
+
+def cmd_draft(args):
+    end = date.fromisoformat(args[0]) if args else date.today()
+    start, end = week_range(end)
+    cfg = load_config()
+    path = draft_path(end)
+    if path.exists():
+        sys.exit(f"すでにあります: {path}\n作り直す場合は削除してから実行してください")
+    DRAFTS.mkdir(exist_ok=True)
+    header = [
+        "---",
+        f"title: 週報 {start:%Y/%m/%d}〜{end:%m/%d}",
+        f"tags: {', '.join(cfg['tags'])}",
+        f"private: {'true' if cfg['private'] else 'false'}",
+        "---",
+        "",
+    ]
+    path.write_text("\n".join(header) + build_body(start, end, cfg))
+    print(f"下書きを作りました: {path}")
+
+
+def parse_draft(path):
+    text = path.read_text()
+    m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
+    if not m:
+        sys.exit(f"先頭に --- で囲んだ title/tags/private がありません: {path}")
+    meta = dict(l.split(":", 1) for l in m[1].splitlines() if ":" in l)
+    meta = {k.strip(): v.strip() for k, v in meta.items()}
+    body = re.sub(r"<!-- /?(summary|next) -->\n?", "", m[2]).strip() + "\n"
+    tags = [t.strip() for t in meta.get("tags", "").split(",") if t.strip()][:5]
+    if not meta.get("title") or not tags:
+        sys.exit("title と tags（1〜5個）は必須です")
+    if "（ここに今週の振り返りを書く）" in body:
+        sys.exit("「今週のまとめ」がまだ書かれていません。下書きを編集してから投稿してください")
+    return {
+        "title": meta["title"],
+        "body": body,
+        "tags": [{"name": t, "versions": []} for t in tags],
+        "private": meta.get("private", "true").lower() != "false",
+        "tweet": False,
+    }
+
+
+# ---------- 投稿 ----------
+
+def read_posted():
+    if not POSTED.exists():
+        return {}
+    rows = [l.split(",") for l in POSTED.read_text().splitlines()[1:] if l]
+    return {r[0]: r for r in rows}
+
+
+def token():
+    t = os.environ.get("QIITA_TOKEN") or (TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else "")
+    if not t:
+        sys.exit(f"Qiita のアクセストークンがありません。README の「準備」を参照して {TOKEN_FILE} に保存してください")
+    return t
+
+
+def latest_draft():
+    drafts = sorted(DRAFTS.glob("*_週報.md"))
+    if not drafts:
+        sys.exit("下書きがありません。先に qiita draft を実行してください")
+    return drafts[-1]
+
+
+def cmd_post(args):
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    path = Path(args[0]).resolve() if args else latest_draft()
+    payload = parse_draft(path)
+    posted = read_posted()
+    prev = posted.get(path.name)
+
+    if dry:
+        print(("PATCH " + prev[1]) if prev else "POST (新規)")
+        print(json.dumps({**payload, "body": payload["body"][:500] + "…"}, ensure_ascii=False, indent=2))
+        return
+
+    url, method = (f"{API}/{prev[1]}", "PATCH") if prev else (API, "POST")
+    req = urllib.request.Request(
+        url, method=method, data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as res:
+            item = json.load(res)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"投稿に失敗しました ({e.code}): {e.read().decode(errors='ignore')}")
+
+    posted[path.name] = [path.name, item["id"], item["url"], datetime.now().strftime("%Y-%m-%d %H:%M")]
+    POSTED.write_text("下書き,記事ID,URL,投稿日時\n" + "".join(",".join(r) + "\n" for r in posted.values()))
+    kind = "限定共有" if payload["private"] else "公開"
+    print(f"{'更新' if prev else '投稿'}しました（{kind}）: {item['url']}")
+
+
+def cmd_status(_):
+    posted = read_posted()
+    for d in sorted(DRAFTS.glob("*_週報.md")):
+        r = posted.get(d.name)
+        print(f"{d.name}  {'投稿済み ' + r[2] if r else '未投稿'}")
+
+
+COMMANDS = {"draft": cmd_draft, "post": cmd_post, "status": cmd_status}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print(re.sub(r"^# ?", "", open(__file__).read().split("\n\n")[0].split("\n", 1)[1], flags=re.M))
+        sys.exit(1)
+    COMMANDS[sys.argv[1]](sys.argv[2:])

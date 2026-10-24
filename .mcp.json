@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "notebooklm": {
+      "command": "/Users/tokunagatadashitomoe/.local/bin/notebooklm-mcp",
+      "args": []
+    }
+  }
+}

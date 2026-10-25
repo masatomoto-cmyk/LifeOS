@@ -5,7 +5,7 @@
 ## DeepSeek（ds）を最初に使う（トークン節約）
 
 ユーザーの方針: **まず ds に任せ、ds にできないことだけ Claude が行う。**
-`ds` は**まず無料の GLM（Z.ai の GLM-4.7-Flash）に送り、だめなときだけ DeepSeek に回す**（2026-10-25 のユーザーの方針: 重い作業も含めてすべて GLM を先に使い、費用を最小にする）。本体はこのリポジトリの `bin/ds`（Mac での入れ替え手順は下の「ds の仕組みと入れ替え手順」）。以下で「DeepSeek」と書いている作業の分担は、GLM にもそのまま当てはまる。
+`ds` は**無料の GLM（Z.ai の GLM-4.7-Flash）だけを使う**（2026-10-25 のユーザーの方針: 重い作業も含めてすべて無料の GLM に任せる。有料のモデルや DeepSeek には送らない）。本体はこのリポジトリの `bin/ds`（Mac での入れ替え手順は下の「ds の仕組みと入れ替え手順」）。以下で「DeepSeek」と書いている作業の分担は、GLM にそのまま当てはまる。
 `ds` コマンド（`~/.local/bin/ds`）で呼ぶ。文章を渡して結果の文章を受け取るだけの読み取り専用で、ファイルの変更・コマンド実行・Web 閲覧はできない。
 Claude Code のシェルでは `~/.local/bin` が PATH に入っていないことがあるので、**必ずフルパス `~/.local/bin/ds` で呼ぶ**（`ds` だけだと command not found になる）。
 
@@ -49,17 +49,17 @@ cat 00_Inbox/長い資料.txt | ~/.local/bin/ds "要点を箇条書き10行以�
 - **長い資料の要約**：Bandcamp Daily などの長い記事から、紹介されているアーティスト名と作品・拠点を抜き出してもらう
 
 ### ds の仕組みと入れ替え手順
-- `bin/ds` が GLM に送り、次のときは自動で元の DeepSeek 用コマンド（`~/.local/bin/ds-deepseek`）に回す: GLM の API キーがない、エラー（無料枠の同時 1 件の上限・入力が長すぎる・サーバーエラー・通信エラー）、答えが空。並列で呼ぶと上限に当たって DeepSeek に回りやすいので、ds は順番に呼ぶ
-- どちらに送ったかは標準エラーに `[ds] ...` と出る（`DS_QUIET=1` で消える）。GLM の答えが不十分なときは `--deepseek` を付けて DeepSeek で取り直す
-- 呼び出し方・`--max`・終了コード（2・3・4・5）は従来どおり。送信禁止（10_Life・秘密情報らしき入力）は `bin/ds` でも止める
+- `bin/ds` は無料の GLM-4.7-Flash だけに送る。有料のモデル（GLM-5.3-Flash など）は `GLM_MODEL` で指定しても受け付けない。DeepSeek にも回さない
+- 失敗したとき（キーなし 2・エラー 3・上限で答えが出ない 5）は、上の決まりどおり Claude が自分で行う。入力が長すぎてエラーになるときは、分けて渡すか Claude が読む
+- 無料枠は同時に 1 件まで。上限に当たると最大 3 回待ってやり直すが、ds は並列にせず順番に呼ぶ
+- 呼び出し方・`--max`・送信禁止（10_Life・秘密情報らしき入力は止める）は従来どおり。標準エラーの `[ds] ...` は `DS_QUIET=1` で消える
 - Mac での入れ替え（一度だけ）:
   ```bash
-  mv ~/.local/bin/ds ~/.local/bin/ds-deepseek          # 元の ds を DeepSeek 用として残す
+  mv ~/.local/bin/ds ~/.local/bin/ds-deepseek          # 元の ds は念のため残す（使わない）
   ln -s <このリポジトリ>/bin/ds ~/.local/bin/ds
   mkdir -p ~/.config/glm && chmod 700 ~/.config/glm
   # Z.ai で発行した API キーを ~/.config/glm/api_key に保存し chmod 600（または環境変数 GLM_API_KEY）
   ```
-- 設定は環境変数で変えられる: `GLM_MODEL`（既定 `glm-4.7-flash`）、`GLM_BASE_URL`（既定 `https://api.z.ai/api/paas/v4`）、`DS_DEEPSEEK`
 
 ### DeepSeek・GLM に渡さないもの
 DeepSeek も GLM（Zhipu / Z.ai）も中国の企業で、送ったデータは中国などで処理・保存される。GLM の無料枠は送った内容を学習に使うかどうかの条件がはっきりしない。次は渡さない（`ds` も 10_Life と秘密情報らしき入力は自動で止める）。

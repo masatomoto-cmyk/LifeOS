@@ -53,13 +53,7 @@ cat 00_Inbox/長い資料.txt | ~/.local/bin/ds "要点を箇条書き10行以�
 - 失敗したとき（キーなし 2・エラー 3・上限で答えが出ない 5）は、上の決まりどおり Claude が自分で行う。入力が長すぎてエラーになるときは、分けて渡すか Claude が読む
 - 無料枠は同時に 1 件まで。上限に当たると最大 3 回待ってやり直すが、ds は並列にせず順番に呼ぶ
 - 呼び出し方・`--max`・送信禁止（10_Life・秘密情報らしき入力は止める）は従来どおり。標準エラーの `[ds] ...` は `DS_QUIET=1` で消える
-- Mac での入れ替え（一度だけ）:
-  ```bash
-  mv ~/.local/bin/ds ~/.local/bin/ds-deepseek          # 元の ds は念のため残す（使わない）
-  ln -s <このリポジトリ>/bin/ds ~/.local/bin/ds
-  mkdir -p ~/.config/glm && chmod 700 ~/.config/glm
-  # Z.ai で発行した API キーを ~/.config/glm/api_key に保存し chmod 600（または環境変数 GLM_API_KEY）
-  ```
+- Mac への入れ方: リポジトリで `bash bin/install-ds.sh` を実行する（`~/.local/bin/ds` をつなぎ、元の ds は `ds-deepseek` として残し、Z.ai の API キーを `~/.config/glm/api_key` に保存して動作確認まで行う）。キーを入れ直すときは `bash bin/install-ds.sh --key`
 
 ### DeepSeek・GLM に渡さないもの
 DeepSeek も GLM（Zhipu / Z.ai）も中国の企業で、送ったデータは中国などで処理・保存される。GLM の無料枠は送った内容を学習に使うかどうかの条件がはっきりしない。次は渡さない（`ds` も 10_Life と秘密情報らしき入力は自動で止める）。

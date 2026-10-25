@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""ds: 文章を AI に渡して結果の文章を受け取る（読み取り専用）。
+
+まず無料の GLM（Z.ai の GLM-4.7-Flash）に送り、だめなときだけ DeepSeek（ds-deepseek）に回す。
+呼び出し方は従来の ds と同じ:
+  cat 資料.txt | ds "要点を10行で"
+  ds "2つの違いを表で" a.md b.md
+  ds --max 1500 "エラーを原因ごとに" < app.log
+
+DeepSeek に回すとき:
+  - GLM の API キーがない
+  - GLM がエラーを返した（同時実行の上限・入力が長すぎる・サーバーエラー・通信エラー）
+  - GLM の答えが空だった
+  - --deepseek を付けた（GLM を飛ばす）
+
+終了コード（従来の ds とそろえる）: 2 キー未設定 / 3 API エラー / 4 送信禁止 / 5 上限で答えが出ない
+
+設定（環境変数）:
+  GLM_API_KEY     Z.ai の API キー（なければ ~/.config/glm/api_key を読む）
+  GLM_BASE_URL    既定 https://api.z.ai/api/paas/v4（中国版は https://open.bigmodel.cn/api/paas/v4）
+  GLM_MODEL       既定 glm-4.7-flash（無料）
+  DS_DEEPSEEK     DeepSeek 側のコマンド。既定 ~/.local/bin/ds-deepseek（元の ds を改名したもの）
+  DS_QUIET=1      どちらに送ったかの表示（標準エラー）を消す
+"""
+
+import json
+import os
+import re
+import select
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HOME = os.path.expanduser("~")
+GLM_BASE_URL = os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/paas/v4").rstrip("/")
+GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4.7-flash")
+DEEPSEEK_CMD = os.environ.get("DS_DEEPSEEK", os.path.join(HOME, ".local/bin/ds-deepseek"))
+QUIET = os.environ.get("DS_QUIET") == "1"
+DEFAULT_MAX = 800
+# GLM-4.7-Flash は考える過程にも出力トークンを使う。無料なので余裕を足して、答えが途中で切れないようにする
+THINKING_HEADROOM = 4096
+TIMEOUT = 300
+
+# 送信禁止（GLM も DeepSeek と同じく中国の企業。CLAUDE.md「DeepSeek に渡さないもの」）
+SECRET_PATTERNS = [
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"\bsk-[A-Za-z0-9_-]{20,}",
+    r"\bAKIA[0-9A-Z]{16}\b",
+    r"\bgh[pousr]_[A-Za-z0-9]{30,}",
+    r"\bgithub_pat_[A-Za-z0-9_]{30,}",
+    r"\bxox[abprs]-[A-Za-z0-9-]{10,}",
+    r"\bAIza[0-9A-Za-z_-]{35}\b",
+    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.",
+    r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*\S{6,}",
+    r"(マイナンバー|個人番号|口座番号)\D{0,10}\d{4,}",
+]
+
+
+def log(msg):
+    if not QUIET:
+        print(f"[ds] {msg}", file=sys.stderr)
+
+
+def die(code, msg):
+    print(f"ds: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def parse_args(argv):
+    max_tokens = DEFAULT_MAX
+    force_deepseek = False
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--max" and i + 1 < len(argv):
+            try:
+                max_tokens = int(argv[i + 1])
+            except ValueError:
+                die(1, f"--max には数を指定してください: {argv[i + 1]}")
+            i += 2
+            continue
+        if a == "--deepseek":
+            force_deepseek = True
+        else:
+            rest.append(a)
+        i += 1
+    if not rest:
+        die(1, '使い方: ds [--max N] [--deepseek] "指示" [ファイル...] [< 入力]')
+    return max_tokens, force_deepseek, rest[0], rest[1:]
+
+
+def check_forbidden(paths, texts):
+    for p in [os.getcwd()] + [os.path.abspath(p) for p in paths]:
+        if "/10_Life" in p or p.startswith("10_Life"):
+            die(4, f"10_Life 配下は送れません: {p}")
+    for t in texts:
+        for pat in SECRET_PATTERNS:
+            if re.search(pat, t):
+                die(4, "秘密情報らしき内容が含まれるため送りません")
+
+
+def read_glm_key():
+    key = os.environ.get("GLM_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with open(os.path.join(HOME, ".config/glm/api_key"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def read_stdin(wait):
+    """標準入力を読む。ファイルを渡したときは、入力がすぐ来なければ待たない（止まったままになるのを防ぐ）。"""
+    if sys.stdin.isatty():
+        return ""
+    if not wait:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+        if not ready:
+            return ""
+    return sys.stdin.read()
+
+
+def build_message(instruction, files, stdin_text):
+    parts = [instruction]
+    for name, body in files:
+        parts.append(f"\n--- ファイル: {name} ---\n{body}")
+    if stdin_text:
+        parts.append(f"\n--- 入力 ---\n{stdin_text}")
+    return "\n".join(parts)
+
+
+def call_glm(key, message, max_tokens):
+    """答えの文章を返す。DeepSeek に回すべきときは None を返す。"""
+    body = json.dumps({
+        "model": GLM_MODEL,
+        "messages": [{"role": "user", "content": message}],
+        "max_tokens": max_tokens + THINKING_HEADROOM,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{GLM_BASE_URL}/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    # 無料枠は同時に 1 件まで。並列で呼ばれて 429 になったら少し待って 1 回だけやり直す
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
+                data = json.load(res)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt == 0:
+                time.sleep(3)
+                continue
+            detail = e.read().decode("utf-8", "replace")[:200]
+            log(f"GLM エラー {e.code}: {detail}")
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            log(f"GLM に接続できません: {e}")
+            return None
+    else:
+        return None
+
+    try:
+        content = (data["choices"][0]["message"].get("content") or "").strip()
+    except (KeyError, IndexError, TypeError):
+        log("GLM の応答の形が想定外です")
+        return None
+    if not content:
+        log("GLM の答えが空でした")
+        return None
+    return content
+
+
+def run_deepseek(argv, stdin_text):
+    if not os.access(DEEPSEEK_CMD, os.X_OK):
+        die(3, f"DeepSeek のコマンドがありません: {DEEPSEEK_CMD}")
+    log("DeepSeek に送ります")
+    sys.stdout.flush()
+    if stdin_text:
+        r, w = os.pipe()
+        if os.fork() == 0:
+            os.close(r)
+            with os.fdopen(w, "w", encoding="utf-8") as f:
+                f.write(stdin_text)
+            os._exit(0)
+        os.close(w)
+        os.dup2(r, 0)
+        os.close(r)
+    else:
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+    args = [a for a in argv if a != "--deepseek"]
+    os.execv(DEEPSEEK_CMD, [DEEPSEEK_CMD] + args)
+
+
+def main():
+    argv = sys.argv[1:]
+    max_tokens, force_deepseek, instruction, paths = parse_args(argv)
+
+    stdin_text = read_stdin(wait=not paths)
+    files = []
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                files.append((os.path.basename(p), f.read()))
+        except OSError as e:
+            die(1, f"ファイルを読めません: {p} ({e.strerror})")
+
+    check_forbidden(paths, [instruction, stdin_text] + [b for _, b in files])
+
+    if not force_deepseek:
+        key = read_glm_key()
+        if key:
+            log(f"GLM（{GLM_MODEL}）に送ります")
+            answer = call_glm(key, build_message(instruction, files, stdin_text), max_tokens)
+            if answer is not None:
+                print(answer)
+                return
+        else:
+            log("GLM の API キーがないため")
+
+    run_deepseek(argv, stdin_text)
+
+
+if __name__ == "__main__":
+    main()

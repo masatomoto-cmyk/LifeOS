@@ -2,10 +2,11 @@
 
 フォルダ構成とルールは README.md を参照。
 
-## DeepSeek を最初に使う（トークン節約）
+## DeepSeek（ds）を最初に使う（トークン節約）
 
-ユーザーの方針: **まず DeepSeek に任せ、DeepSeek にできないことだけ Claude が行う。**
-DeepSeek は `ds` コマンド（`~/.local/bin/ds`）で呼ぶ。文章を渡して結果の文章を受け取るだけの読み取り専用で、ファイルの変更・コマンド実行・Web 閲覧はできない。
+ユーザーの方針: **まず ds に任せ、ds にできないことだけ Claude が行う。**
+`ds` は**まず無料の GLM（Z.ai の GLM-4.7-Flash）に送り、だめなときだけ DeepSeek に回す**（2026-10-25 のユーザーの方針: 重い作業も含めてすべて GLM を先に使い、費用を最小にする）。本体はこのリポジトリの `bin/ds`（Mac での入れ替え手順は下の「ds の仕組みと入れ替え手順」）。以下で「DeepSeek」と書いている作業の分担は、GLM にもそのまま当てはまる。
+`ds` コマンド（`~/.local/bin/ds`）で呼ぶ。文章を渡して結果の文章を受け取るだけの読み取り専用で、ファイルの変更・コマンド実行・Web 閲覧はできない。
 Claude Code のシェルでは `~/.local/bin` が PATH に入っていないことがあるので、**必ずフルパス `~/.local/bin/ds` で呼ぶ**（`ds` だけだと command not found になる）。
 
 ### DeepSeek に任せる（文章を読む・書く作業）
@@ -47,8 +48,21 @@ cat 00_Inbox/長い資料.txt | ~/.local/bin/ds "要点を箇条書き10行以�
 - **紹介文の下書き**：Claude が公式ページで確かめた事実だけを渡し、`intro`（2段落）・`catch`（一言）・`points`（制作のポイント2つ）の下書きを書いてもらう。渡していない事実を足していないか、Claude が照らし合わせてから `src/data/artists.js` に入れる
 - **長い資料の要約**：Bandcamp Daily などの長い記事から、紹介されているアーティスト名と作品・拠点を抜き出してもらう
 
-### DeepSeek に渡さないもの
-DeepSeek は中国の企業で、送ったデータは中国で処理・保存される。次は渡さない（`ds` も 10_Life と秘密情報らしき入力は自動で止める）。
+### ds の仕組みと入れ替え手順
+- `bin/ds` が GLM に送り、次のときは自動で元の DeepSeek 用コマンド（`~/.local/bin/ds-deepseek`）に回す: GLM の API キーがない、エラー（無料枠の同時 1 件の上限・入力が長すぎる・サーバーエラー・通信エラー）、答えが空。並列で呼ぶと上限に当たって DeepSeek に回りやすいので、ds は順番に呼ぶ
+- どちらに送ったかは標準エラーに `[ds] ...` と出る（`DS_QUIET=1` で消える）。GLM の答えが不十分なときは `--deepseek` を付けて DeepSeek で取り直す
+- 呼び出し方・`--max`・終了コード（2・3・4・5）は従来どおり。送信禁止（10_Life・秘密情報らしき入力）は `bin/ds` でも止める
+- Mac での入れ替え（一度だけ）:
+  ```bash
+  mv ~/.local/bin/ds ~/.local/bin/ds-deepseek          # 元の ds を DeepSeek 用として残す
+  ln -s <このリポジトリ>/bin/ds ~/.local/bin/ds
+  mkdir -p ~/.config/glm && chmod 700 ~/.config/glm
+  # Z.ai で発行した API キーを ~/.config/glm/api_key に保存し chmod 600（または環境変数 GLM_API_KEY）
+  ```
+- 設定は環境変数で変えられる: `GLM_MODEL`（既定 `glm-4.7-flash`）、`GLM_BASE_URL`（既定 `https://api.z.ai/api/paas/v4`）、`DS_DEEPSEEK`
+
+### DeepSeek・GLM に渡さないもの
+DeepSeek も GLM（Zhipu / Z.ai）も中国の企業で、送ったデータは中国などで処理・保存される。GLM の無料枠は送った内容を学習に使うかどうかの条件がはっきりしない。次は渡さない（`ds` も 10_Life と秘密情報らしき入力は自動で止める）。
 - `10_Life` 配下すべて（お金・健康・住まい・公的書類・勤怠など）
 - パスワード・API キー・トークン・秘密鍵、マイナンバーや口座番号を含むもの
 - 自分のサービス（OTOMO・DTM PICKS・DTM DIGS など）のユーザーの個人情報（メールアドレス、投稿やデータベースの書き出し、ログ中の個人情報）。プライバシーポリシーに書いた委託先以外へ送ることになるため

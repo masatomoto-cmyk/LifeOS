@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Qiita のアクセストークンを ~/.config/qiita/token に保存する（入力は画面に表示されない）
 set -e
+umask 077
 
 FILE="$HOME/.config/qiita/token"
 read -rs "t?Qiitaトークンを貼り付けて Enter: "

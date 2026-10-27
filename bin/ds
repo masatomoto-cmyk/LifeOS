@@ -24,6 +24,7 @@ import select
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HOME = os.path.expanduser("~")
@@ -31,6 +32,8 @@ GLM_BASE_URL = os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/paas/v4").rs
 GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4.7-flash")
 # 料金がかからないモデルだけ。ここにないモデル（GLM-5.3-Flash など有料のもの）は使わない
 FREE_MODELS = {"glm-4.7-flash", "glm-4.5-flash"}
+# API キーを送る先は Z.ai / 智譜の公式ホストだけ（環境変数で別のサーバーに差し替えられてもキーを渡さない）
+ALLOWED_HOSTS = {"api.z.ai", "open.bigmodel.cn"}
 QUIET = os.environ.get("DS_QUIET") == "1"
 DEFAULT_MAX = 800
 # GLM-4.7-Flash は考える過程にも出力トークンを使う。無料なので余裕を足して、答えが途中で切れないようにする
@@ -84,10 +87,21 @@ def parse_args(argv):
     return max_tokens, rest[0], rest[1:]
 
 
+# 認証情報の置き場所。ファイルとして渡されても送らない
+SENSITIVE_DIRS = {".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config"}
+SENSITIVE_NAMES = {".env", ".netrc", ".npmrc", ".pgpass", "id_rsa", "id_ed25519", "credentials"}
+
+
 def check_forbidden(paths, texts):
-    for p in [os.getcwd()] + [os.path.abspath(p) for p in paths]:
-        if "/10_Life" in p or p.startswith("10_Life"):
+    # シンボリックリンクで 10_Life を迂回されないよう、実体のパスで調べる
+    for p in [os.getcwd()] + [os.path.realpath(p) for p in paths]:
+        parts = p.split(os.sep)
+        if "10_Life" in parts:
             die(4, f"10_Life 配下は送れません: {p}")
+    for p in (os.path.realpath(p) for p in paths):
+        parts = p.split(os.sep)
+        if SENSITIVE_DIRS & set(parts) or os.path.basename(p) in SENSITIVE_NAMES or os.path.basename(p).startswith(".env"):
+            die(4, f"認証情報の置き場所らしいファイルは送れません: {p}")
     for t in texts:
         for pat in SECRET_PATTERNS:
             if re.search(pat, t):
@@ -125,6 +139,11 @@ def build_message(instruction, files, stdin_text):
     return "\n".join(parts)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def call_glm(key, message, max_tokens):
     body = json.dumps({
         "model": GLM_MODEL,
@@ -132,14 +151,20 @@ def call_glm(key, message, max_tokens):
         "max_tokens": max_tokens + THINKING_HEADROOM,
         "stream": False,
     }).encode("utf-8")
+    url = f"{GLM_BASE_URL}/chat/completions"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
+        die(1, f"GLM_BASE_URL は {', '.join(sorted(ALLOWED_HOSTS))} の https だけ使えます")
     req = urllib.request.Request(
-        f"{GLM_BASE_URL}/chat/completions",
+        url,
         data=body,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
+    # リダイレクトは辿らない（キーを別のホストへ持ち出さないため）
+    opener = urllib.request.build_opener(_NoRedirect)
     for wait in RETRY_WAITS + [None]:
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
+            with opener.open(req, timeout=TIMEOUT) as res:
                 data = json.load(res)
             break
         except urllib.error.HTTPError as e:

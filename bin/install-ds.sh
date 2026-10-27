@@ -2,6 +2,7 @@
 # 無料の GLM を使う ds を Mac に入れる（何度実行してもよい）
 # 使い方: bash bin/install-ds.sh        キーを入れ直すとき: bash bin/install-ds.sh --key
 set -e
+umask 077   # キーのファイルが一瞬でも他人に読める権限で作られないようにする
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HOME/.local/bin"

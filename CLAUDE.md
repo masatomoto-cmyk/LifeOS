@@ -5,7 +5,9 @@
 ## DeepSeek（ds）を最初に使う（トークン節約）
 
 ユーザーの方針: **まず ds に任せ、ds にできないことだけ Claude が行う。**
-`ds` は**無料の GLM（Z.ai の GLM-4.7-Flash）だけを使う**（2026-10-25 のユーザーの方針: 重い作業も含めてすべて無料の GLM に任せる。有料のモデルや DeepSeek には送らない）。本体はこのリポジトリの `bin/ds`（Mac での入れ替え手順は下の「ds の仕組みと入れ替え手順」）。以下で「DeepSeek」と書いている作業の分担は、GLM にそのまま当てはまる。
+> 2026-10-27 更新: ユーザーの方針で GLM は外した。ds の送り先は Groq → Mac 内の AI（Ollama）だけ（`DS_ORDER` の既定 "groq,ollama"）。下の GLM の記述は古い。OpenRouter・Gemini・Cerebras はキー未設定で使っていない。
+
+`ds` は**無料の AI だけを使う**。まず無料の GLM（Z.ai の GLM-4.7-Flash）に送り、失敗したら予備の無料 AI（キーを保存したものだけ。Groq → OpenRouter の無料モデル → Gemini → Cerebras）に順に回す（2026-10-25 のユーザーの方針: 重い作業も含めてすべて無料の AI に任せる。2026-10-27 に予備を追加。有料のモデルや DeepSeek には送らない）。本体はこのリポジトリの `bin/ds`（Mac での入れ替え手順は下の「ds の仕組みと入れ替え手順」）。以下で「DeepSeek」と書いている作業の分担は、GLM にそのまま当てはまる。
 `ds` コマンド（`~/.local/bin/ds`）で呼ぶ。文章を渡して結果の文章を受け取るだけの読み取り専用で、ファイルの変更・コマンド実行・Web 閲覧はできない。
 Claude Code のシェルでは `~/.local/bin` が PATH に入っていないことがあるので、**必ずフルパス `~/.local/bin/ds` で呼ぶ**（`ds` だけだと command not found になる）。
 
@@ -49,14 +51,16 @@ cat 00_Inbox/長い資料.txt | ~/.local/bin/ds "要点を箇条書き10行以�
 - **長い資料の要約**：Bandcamp Daily などの長い記事から、紹介されているアーティスト名と作品・拠点を抜き出してもらう
 
 ### ds の仕組みと入れ替え手順
-- `bin/ds` は無料の GLM-4.7-Flash だけに送る。有料のモデル（GLM-5.3-Flash など）は `GLM_MODEL` で指定しても受け付けない。DeepSeek にも回さない
+- `bin/ds` はまず無料の GLM-4.7-Flash に送る。有料のモデル（GLM-5.3-Flash など）は `GLM_MODEL` で指定しても受け付けない。DeepSeek にも回さない
+- GLM が失敗したら、予備の AI に順に回す（`~/.config/ds/<名前>.key` があるものだけ）。足し方は `bash bin/install-ds.sh --add groq|openrouter|gemini|cerebras`（キーはユーザーがターミナルで貼る。Claude はキーを入力しない）、状態は `--list`。順番は `DS_ORDER` で変えられる
+- 予備の注意: OpenRouter は無料モデル（`:free` か `openrouter/free`）以外を受け付けない。Gemini の無料枠は送った内容が Google の改善に使われ、人が読むこともある。Cerebras はカード登録が必要で、無料は30日の $5 分だけ。どれも課金の設定はしない
 - 失敗したとき（キーなし 2・エラー 3・上限で答えが出ない 5）は、上の決まりどおり Claude が自分で行う。入力が長すぎてエラーになるときは、分けて渡すか Claude が読む
 - 無料枠は同時に 1 件まで。上限に当たると最大 3 回待ってやり直すが、ds は並列にせず順番に呼ぶ
 - 呼び出し方・`--max`・送信禁止（10_Life・秘密情報らしき入力は止める）は従来どおり。標準エラーの `[ds] ...` は `DS_QUIET=1` で消える
 - Mac への入れ方: リポジトリで `bash bin/install-ds.sh` を実行する（`~/.local/bin/ds` をつなぎ、元の ds は `ds-deepseek` として残し、Z.ai の API キーを `~/.config/glm/api_key` に保存して動作確認まで行う）。キーを入れ直すときは `bash bin/install-ds.sh --key`
 
-### DeepSeek・GLM に渡さないもの
-DeepSeek も GLM（Zhipu / Z.ai）も中国の企業で、送ったデータは中国などで処理・保存される。GLM の無料枠は送った内容を学習に使うかどうかの条件がはっきりしない。次は渡さない（`ds` も 10_Life と秘密情報らしき入力は自動で止める）。
+### DeepSeek・GLM（と予備の AI）に渡さないもの
+DeepSeek も GLM（Zhipu / Z.ai）も中国の企業で、送ったデータは中国などで処理・保存される。予備の AI（Groq・OpenRouter・Gemini・Cerebras）も外部のサービスで、Gemini の無料枠は学習に使われるため、同じものを渡さない。GLM の無料枠は送った内容を学習に使うかどうかの条件がはっきりしない。次は渡さない（`ds` も 10_Life と秘密情報らしき入力は自動で止める）。
 - `10_Life` 配下すべて（お金・健康・住まい・公的書類・勤怠など）
 - パスワード・API キー・トークン・秘密鍵、マイナンバーや口座番号を含むもの
 - 自分のサービス（OTOMO・DTM PICKS・DTM DIGS など）のユーザーの個人情報（メールアドレス、投稿やデータベースの書き出し、ログ中の個人情報）。プライバシーポリシーに書いた委託先以外へ送ることになるため

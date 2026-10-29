@@ -152,8 +152,11 @@ def play_notes(out, args, notes, dur, gap=0.0, together=False):
 
 
 def panic(out, args):
-    out.send(mido.Message("control_change", channel=ch(args), control=123, value=0))
-    out.send(mido.Message("control_change", channel=ch(args), control=120, value=0))
+    """全チャンネルでペダルを離し、全音を止める（チャンネル違いの鳴りっぱなしにも効くように）。"""
+    for c in range(16):
+        out.send(mido.Message("control_change", channel=c, control=64, value=0))
+        out.send(mido.Message("control_change", channel=c, control=123, value=0))
+        out.send(mido.Message("control_change", channel=c, control=120, value=0))
 
 
 def audio_device_index(hint):

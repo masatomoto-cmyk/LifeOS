@@ -1,0 +1,3 @@
+#!/bin/bash
+# Roland S-1 操作コマンド。本体は bin/s1ctl.py（Python 環境は ~/.venvs/s1）
+exec ~/.venvs/s1/bin/python -I "$(dirname "$(readlink -f "$0")")/s1ctl.py" "$@"

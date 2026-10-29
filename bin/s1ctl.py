@@ -152,11 +152,14 @@ def play_notes(out, args, notes, dur, gap=0.0, together=False):
 
 
 def panic(out, args):
-    """全チャンネルでペダルを離し、全音を止める（チャンネル違いの鳴りっぱなしにも効くように）。"""
+    """全チャンネルでペダルを離し、全音を止める（チャンネル違いの鳴りっぱなしにも効くように）。
+    S-1 は CC123/120 を無視するので、128 音すべてにノートオフも送る（2026-10-29 実測）。"""
     for c in range(16):
         out.send(mido.Message("control_change", channel=c, control=64, value=0))
         out.send(mido.Message("control_change", channel=c, control=123, value=0))
         out.send(mido.Message("control_change", channel=c, control=120, value=0))
+        for n in range(128):
+            out.send(mido.Message("note_off", channel=c, note=n, velocity=0))
 
 
 def audio_device_index(hint):

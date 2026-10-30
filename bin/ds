@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """ds: 文章を AI に渡して結果の文章を受け取る（読み取り専用）。
 
-無料の AI だけを使う。まず Groq に送り、混んでいたら Groq の別の無料モデルに切り替え、
-それでもだめなら Mac 内の AI（Ollama）に送る。
+無料の AI だけを使う。まず Groq に送り、混んでいたら Groq の別の無料モデルに切り替える。
 ほかの予備はキーを保存したものだけ使う（bash bin/install-ds.sh --add openrouter など）:
   OpenRouter（無料のモデルだけ）→ Gemini → Cerebras（カード登録が必要で、無料は登録後30日の $5 分だけ）
 有料のモデル・DeepSeek・GLM には送らない。
@@ -16,7 +15,7 @@
 
 設定（環境変数）:
   DS_QUIET=1      送信先の表示（標準エラー）を消す
-  DS_ORDER        送る順番を変える（例: "ollama,groq"）。既定 groq,ollama
+  DS_ORDER        送る順番を変える（例: "groq,openrouter"）。既定 groq
 予備の AI のキーとモデルは ~/.config/ds/<名前>.key と <名前>.model（install-ds.sh が保存する）
 """
 
@@ -115,24 +114,12 @@ BACKUPS = {
     # 無料枠では送った内容が Google の改善に使われ、人が読むこともある
     "gemini": {"label": "Gemini", "base": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-2.5-flash"},
     "cerebras": {"label": "Cerebras", "base": "https://api.cerebras.ai/v1", "model": "gpt-oss-120b"},
-    # この Mac の中で動く AI（Ollama）。キー不要・外に送らない・回数の上限なし。遅めなので最後の予備
-    "ollama": {"label": "Mac 内の AI", "base": "http://localhost:11434/v1", "model": "qwen3:8b", "local": True},
 }
 # API キーを送る先は各社の公式ホストだけ（環境変数で別のサーバーに差し替えられてもキーを渡さない）
 ALLOWED_HOSTS = {"api.groq.com", "openrouter.ai",
                  "generativelanguage.googleapis.com", "api.cerebras.ai"}
 DS_CONF = os.path.join(HOME, ".config/ds")
-ORDER = [x.strip() for x in os.environ.get("DS_ORDER", "groq,ollama").split(",") if x.strip()]
-
-
-def ollama_ready(model):
-    """Ollama が動いていて、そのモデルが入っているか。"""
-    try:
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as res:
-            names = {m.get("name") for m in json.load(res).get("models", [])}
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        return False
-    return model in names or f"{model}:latest" in names
+ORDER = [x.strip() for x in os.environ.get("DS_ORDER", "groq").split(",") if x.strip()]
 
 
 class Fail(Exception):
@@ -151,9 +138,6 @@ def read_file(path):
 
 def backup_settings(name):
     """予備の AI の (キー, モデル)。キーがなければ None。"""
-    if BACKUPS[name].get("local"):
-        model = read_file(os.path.join(DS_CONF, f"{name}.model")) or BACKUPS[name]["model"]
-        return ("ollama", model) if ollama_ready(model) else None
     key = read_file(os.path.join(DS_CONF, f"{name}.key"))
     if not key:
         return None
@@ -199,8 +183,8 @@ def call_chat(label, base, key, model, message, max_tokens, waits=None):
     }).encode("utf-8")
     url = f"{base}/chat/completions"
     parsed = urllib.parse.urlparse(url)
-    # Mac 内の AI（localhost）以外は、公式ホストの https だけに送る
-    if parsed.hostname != "localhost" and (parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS):
+    # 公式ホストの https だけに送る
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
         raise Fail(1, f"{label} の送り先 {parsed.hostname} は使えません（{', '.join(sorted(ALLOWED_HOSTS))} の https だけ）")
     req = urllib.request.Request(
         url,
@@ -269,20 +253,18 @@ def main():
         key, model = st
         label, base = BACKUPS[name]["label"], BACKUPS[name]["base"]
         models = [model] + [m for m in BACKUPS[name].get("fallback", []) if m != model]
-        # Mac 内の Qwen3 は「考える」段階が長いので省かせる（/no_think）
-        msg = message + "\n/no_think" if name == "ollama" else message
         for i, m in enumerate(models):
             try:
                 log(f"{label}（{m}・無料）に送ります")
                 # 同じ会社に別のモデルが残っているときは、長く待たずにそちらへ切り替える
                 waits = RETRY_WAITS[:1] if i < len(models) - 1 else None
-                print(call_chat(label, base, key, m, msg, max_tokens, waits))
+                print(call_chat(label, base, key, m, message, max_tokens, waits))
                 return
             except Fail as e:
                 errors.append(e)
                 log(f"{e}（次の AI を試します）")
     if not errors:
-        die(2, "使える AI がありません（Groq は bash bin/install-ds.sh --add groq、Mac 内の AI は ollama serve）")
+        die(2, "使える AI がありません（Groq は bash bin/install-ds.sh --add groq）")
     # どれもだめなら最後のエラーで終わる（上限で答えが出なかったときは 5 を優先して --max を増やすよう促す）
     last = next((e for e in errors if e.code == 5), errors[-1])
     die(last.code, str(last))

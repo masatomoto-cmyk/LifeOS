@@ -1,5 +1,5 @@
 #!/bin/bash
-# 無料の AI（Groq → Mac 内の Ollama）を使う ds を Mac に入れる（何度実行してもよい）
+# 無料の AI（Groq）を使う ds を Mac に入れる（何度実行してもよい）
 # 使い方: bash bin/install-ds.sh        Groq のキーを入れ直すとき: bash bin/install-ds.sh --add groq
 # 予備の AI を足す:  bash bin/install-ds.sh --add groq|openrouter|gemini|cerebras
 # 予備の状態を見る:  bash bin/install-ds.sh --list
@@ -12,8 +12,6 @@ if [ "$1" = "--list" ]; then
   for n in groq openrouter gemini cerebras; do
     if [ -s "$DS_CONF/$n.key" ]; then echo "$n: キーあり（モデル: $(cat "$DS_CONF/$n.model" 2>/dev/null || echo 既定)）"; else echo "$n: 未設定"; fi
   done
-  # Mac 内の AI（Ollama）。キー不要。brew install ollama && brew services start ollama && ollama pull qwen3:8b
-  if curl -s -m 3 http://localhost:11434/api/tags | grep -q '"qwen3:8b"'; then echo "ollama: 使える（qwen3:8b）"; else echo "ollama: 未設定または停止中"; fi
   exit 0
 fi
 
@@ -58,7 +56,7 @@ ln -sf "$DIR/ds" "$BIN/ds"
 echo "ds をつなぎました: $BIN/ds -> $DIR/ds"
 
 if [ ! -s "$DS_CONF/groq.key" ]; then
-  echo "Groq のキーがありません。bash bin/install-ds.sh --add groq で入れてください（なければ Mac 内の AI だけ使います）"
+  echo "Groq のキーがありません。bash bin/install-ds.sh --add groq で入れてください（なければ ds は使えず、Claude が自分で行います）"
 fi
 
 echo "動作確認中..."

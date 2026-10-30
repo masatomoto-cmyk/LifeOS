@@ -5,7 +5,7 @@
 ## DeepSeek（ds）を最初に使う（トークン節約）
 
 ユーザーの方針: **まず ds に任せ、ds にできないことだけ Claude が行う。**
-`ds` は**無料の AI だけを使う**。送る順番は Groq（gpt-oss-120b）→ 混んでいたら Groq の gpt-oss-20b → Mac 内の AI（Ollama の qwen3:8b）（2026-10-30 に整理: 使っていなかった GLM・DeepSeek の設定は外した）。OpenRouter・Gemini・Cerebras はキー未設定で使っていない。本体はこのリポジトリの `bin/ds`（仕組みは下の「ds の仕組み」）。以下で「DeepSeek」と書いている作業の分担は、ds の送り先がどれでもそのまま当てはまる。
+`ds` は**無料の AI だけを使う**。送る順番は Groq（gpt-oss-120b）→ 混んでいたら Groq の gpt-oss-20b（2026-10-30 に整理: 使っていなかった GLM・DeepSeek の設定を外し、動作が重くなっていた Mac 内の AI（Ollama）と Gemini CLI はアンインストールした）。OpenRouter・Gemini・Cerebras はキー未設定で使っていない。本体はこのリポジトリの `bin/ds`（仕組みは下の「ds の仕組み」）。以下で「DeepSeek」と書いている作業の分担は、ds の送り先がどれでもそのまま当てはまる。
 `ds` コマンド（`~/.local/bin/ds`）で呼ぶ。文章を渡して結果の文章を受け取るだけの読み取り専用で、ファイルの変更・コマンド実行・Web 閲覧はできない。
 Claude Code のシェルでは `~/.local/bin` が PATH に入っていないことがあるので、**必ずフルパス `~/.local/bin/ds` で呼ぶ**（`ds` だけだと command not found になる）。
 
@@ -49,7 +49,7 @@ cat 00_Inbox/長い資料.txt | ~/.local/bin/ds "要点を箇条書き10行以�
 - **長い資料の要約**：Bandcamp Daily などの長い記事から、紹介されているアーティスト名と作品・拠点を抜き出してもらう
 
 ### ds の仕組み
-- 順番は既定で `groq,ollama`（`DS_ORDER` で変えられる）。Groq は上限がモデルごとに別なので、gpt-oss-120b が混んでいたら少し待たずに gpt-oss-20b に切り替える。Groq がだめなら Mac 内の AI（遅いが回数の上限なし・外に送らない）
+- 順番は既定で `groq`（`DS_ORDER` で変えられる）。Groq は上限がモデルごとに別なので、gpt-oss-120b が混んでいたら長く待たずに gpt-oss-20b に切り替える。Groq がだめなら ds は失敗する（Claude が自分で行う）
 - 有料のモデル・DeepSeek・GLM には送らない
 - 予備の AI を足すときは `bash bin/install-ds.sh --add openrouter|gemini|cerebras`（キーはユーザーがターミナルで貼る。Claude はキーを入力しない）、状態は `--list`
 - 予備の注意: OpenRouter は無料モデル（`:free` か `openrouter/free`）以外を受け付けない。Gemini の無料枠は送った内容が Google の改善に使われ、人が読むこともある。Cerebras はカード登録が必要で、無料は30日の $5 分だけ。どれも課金の設定はしない

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """ds: 文章を AI に渡して結果の文章を受け取る（読み取り専用）。
 
-無料の AI だけを使う。まず GLM（Z.ai の GLM-4.7-Flash）に送り、失敗したら予備の AI に順に送る。
-予備はキーを保存したものだけ使う（bash bin/install-ds.sh --add groq など）:
-  Groq → OpenRouter（無料のモデルだけ）→ Gemini → Cerebras（カード登録が必要で、無料は登録後30日の $5 分だけ）
-有料のモデル・DeepSeek には送らない。
+無料の AI だけを使う。まず Groq に送り、混んでいたら Groq の別の無料モデルに切り替え、
+それでもだめなら Mac 内の AI（Ollama）に送る。
+ほかの予備はキーを保存したものだけ使う（bash bin/install-ds.sh --add openrouter など）:
+  OpenRouter（無料のモデルだけ）→ Gemini → Cerebras（カード登録が必要で、無料は登録後30日の $5 分だけ）
+有料のモデル・DeepSeek・GLM には送らない。
 呼び出し方は従来の ds と同じ:
   cat 資料.txt | ds "要点を10行で"
   ds "2つの違いを表で" a.md b.md
@@ -14,11 +15,8 @@
 失敗したら Claude が自分で行う（CLAUDE.md）。
 
 設定（環境変数）:
-  GLM_API_KEY     Z.ai の API キー（なければ ~/.config/glm/api_key を読む）
-  GLM_BASE_URL    既定 https://api.z.ai/api/paas/v4（中国版は https://open.bigmodel.cn/api/paas/v4）
-  GLM_MODEL       既定 glm-4.7-flash。無料のモデル（FREE_MODELS）以外は受け付けない
   DS_QUIET=1      送信先の表示（標準エラー）を消す
-  DS_ORDER        送る順番を変える（例: "groq,glm"）。既定 groq,ollama
+  DS_ORDER        送る順番を変える（例: "ollama,groq"）。既定 groq,ollama
 予備の AI のキーとモデルは ~/.config/ds/<名前>.key と <名前>.model（install-ds.sh が保存する）
 """
 
@@ -33,19 +31,15 @@ import urllib.parse
 import urllib.request
 
 HOME = os.path.expanduser("~")
-GLM_BASE_URL = os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/paas/v4").rstrip("/")
-GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4.7-flash")
-# 料金がかからないモデルだけ。ここにないモデル（GLM-5.3-Flash など有料のもの）は使わない
-FREE_MODELS = {"glm-4.7-flash", "glm-4.5-flash"}
 QUIET = os.environ.get("DS_QUIET") == "1"
 DEFAULT_MAX = 800
-# GLM-4.7-Flash は考える過程にも出力トークンを使う。無料なので余裕を足して、答えが途中で切れないようにする
+# 考える過程にも出力トークンを使うモデルがある。無料なので余裕を足して、答えが途中で切れないようにする
 THINKING_HEADROOM = 4096
 TIMEOUT = 300
 # 無料枠は同時に 1 件まで。並列で呼ばれて 429 になったら、この秒数ずつ待ってやり直す
 RETRY_WAITS = [] if os.environ.get("DS_RETRY") == "0" else [3, 6, 12]  # DS_RETRY=0 なら待たずに次の AI へ
 
-# 送信禁止（GLM は中国の企業。CLAUDE.md「DeepSeek・GLM に渡さないもの」）
+# 送信禁止（外部の AI に送るため。CLAUDE.md「DeepSeek・GLM（と予備の AI）に渡さないもの」）
 SECRET_PATTERNS = [
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
     r"\bsk-[A-Za-z0-9_-]{20,}",
@@ -113,7 +107,9 @@ def check_forbidden(paths, texts):
 
 # 予備の AI（OpenAI 互換の chat/completions）。キーのファイルがあるものだけ使う
 BACKUPS = {
-    "groq": {"label": "Groq", "base": "https://api.groq.com/openai/v1", "model": "openai/gpt-oss-120b"},
+    # 上限はモデルごとに別。混んでいたら fallback のモデルに切り替える（どれも無料枠）
+    "groq": {"label": "Groq", "base": "https://api.groq.com/openai/v1", "model": "openai/gpt-oss-120b",
+             "fallback": ["openai/gpt-oss-20b"]},
     # openrouter/free は無料のモデルを自動で選ぶ
     "openrouter": {"label": "OpenRouter", "base": "https://openrouter.ai/api/v1", "model": "openrouter/free"},
     # 無料枠では送った内容が Google の改善に使われ、人が読むこともある
@@ -123,7 +119,7 @@ BACKUPS = {
     "ollama": {"label": "Mac 内の AI", "base": "http://localhost:11434/v1", "model": "qwen3:8b", "local": True},
 }
 # API キーを送る先は各社の公式ホストだけ（環境変数で別のサーバーに差し替えられてもキーを渡さない）
-ALLOWED_HOSTS = {"api.z.ai", "open.bigmodel.cn", "api.groq.com", "openrouter.ai",
+ALLOWED_HOSTS = {"api.groq.com", "openrouter.ai",
                  "generativelanguage.googleapis.com", "api.cerebras.ai"}
 DS_CONF = os.path.join(HOME, ".config/ds")
 ORDER = [x.strip() for x in os.environ.get("DS_ORDER", "groq,ollama").split(",") if x.strip()]
@@ -168,17 +164,6 @@ def backup_settings(name):
     return key, model
 
 
-def read_glm_key():
-    key = os.environ.get("GLM_API_KEY", "").strip()
-    if key:
-        return key
-    try:
-        with open(os.path.join(HOME, ".config/glm/api_key"), encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
 def read_stdin(wait):
     """標準入力を読む。ファイルを渡したときは、入力がすぐ来なければ待たない（止まったままになるのを防ぐ）。"""
     if sys.stdin.isatty():
@@ -204,7 +189,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def call_chat(label, base, key, model, message, max_tokens):
+def call_chat(label, base, key, model, message, max_tokens, waits=None):
     body = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": message}],
@@ -225,7 +210,7 @@ def call_chat(label, base, key, model, message, max_tokens):
     )
     # リダイレクトは辿らない（キーを別のホストへ持ち出さないため）
     opener = urllib.request.build_opener(_NoRedirect)
-    for wait in RETRY_WAITS + [None]:
+    for wait in (RETRY_WAITS if waits is None else waits) + [None]:
         try:
             with opener.open(req, timeout=TIMEOUT) as res:
                 data = json.load(res)
@@ -257,9 +242,6 @@ def call_chat(label, base, key, model, message, max_tokens):
 def main():
     max_tokens, instruction, paths = parse_args(sys.argv[1:])
 
-    if GLM_MODEL not in FREE_MODELS:
-        die(1, f"無料のモデルだけ使えます（{', '.join(sorted(FREE_MODELS))}）: {GLM_MODEL}")
-
     stdin_text = read_stdin(wait=not paths)
     files = []
     for p in paths:
@@ -275,26 +257,32 @@ def main():
     errors = []
     for name in ORDER:
         try:
-            if name == "glm":
-                key = read_glm_key()
-                target = ("GLM", GLM_BASE_URL, key, GLM_MODEL) if key else None
-            elif name in BACKUPS:
-                st = backup_settings(name)
-                target = (BACKUPS[name]["label"], BACKUPS[name]["base"], *st) if st else None
-            else:
+            if name not in BACKUPS:
                 raise Fail(1, f"DS_ORDER に知らない名前があります: {name}")
-            if not target:
-                continue
-            log(f"{target[0]}（{target[3]}・無料）に送ります")
-            # Mac 内の Qwen3 は「考える」段階が長いので省かせる（/no_think）
-            msg = message + "\n/no_think" if name == "ollama" else message
-            print(call_chat(*target, msg, max_tokens))
-            return
+            st = backup_settings(name)
         except Fail as e:
             errors.append(e)
             log(f"{e}（次の AI を試します）")
+            continue
+        if not st:
+            continue
+        key, model = st
+        label, base = BACKUPS[name]["label"], BACKUPS[name]["base"]
+        models = [model] + [m for m in BACKUPS[name].get("fallback", []) if m != model]
+        # Mac 内の Qwen3 は「考える」段階が長いので省かせる（/no_think）
+        msg = message + "\n/no_think" if name == "ollama" else message
+        for i, m in enumerate(models):
+            try:
+                log(f"{label}（{m}・無料）に送ります")
+                # 同じ会社に別のモデルが残っているときは、長く待たずにそちらへ切り替える
+                waits = RETRY_WAITS[:1] if i < len(models) - 1 else None
+                print(call_chat(label, base, key, m, msg, max_tokens, waits))
+                return
+            except Fail as e:
+                errors.append(e)
+                log(f"{e}（次の AI を試します）")
     if not errors:
-        die(2, "API キーがありません（GLM は ~/.config/glm/api_key、予備は bash bin/install-ds.sh --add <名前>）")
+        die(2, "使える AI がありません（Groq は bash bin/install-ds.sh --add groq、Mac 内の AI は ollama serve）")
     # どれもだめなら最後のエラーで終わる（上限で答えが出なかったときは 5 を優先して --max を増やすよう促す）
     last = next((e for e in errors if e.code == 5), errors[-1])
     die(last.code, str(last))

@@ -33,7 +33,8 @@ if [ "$1" = "--add" ]; then
   mkdir -p "$DS_CONF"; chmod 700 "$DS_CONF"
   printf '%s' "$KEY" > "$DS_CONF/$NAME.key"; chmod 600 "$DS_CONF/$NAME.key"
   # 使えるモデルの一覧から、好みの順に1つ選ぶ（見つからなければ ds の既定を使う）
-  MODELS=$(curl -s -H "Authorization: Bearer $KEY" "$BASE/models" | python3 -c "import json,sys
+  # キーはコマンドの引数に載せず（ps で見えてしまう）、ヘッダーとして標準入力から curl に渡す
+  MODELS=$(printf 'Authorization: Bearer %s\n' "$KEY" | curl -s -H @- "$BASE/models" | python3 -c "import json,sys
 try: print('\n'.join(m['id'].removeprefix('models/') for m in json.load(sys.stdin).get('data',[])))
 except Exception: pass")
   unset KEY

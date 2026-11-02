@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.config/ds/*.key)",
+      "Edit(~/.config/ds/*.key)",
+      "Write(~/.config/ds/*.key)",
+      "Read(~/.config/qiita/token)",
+      "Edit(~/.config/qiita/token)",
+      "Write(~/.config/qiita/token)",
+      "Read(~/.ssh/**)",
+      "Edit(~/.ssh/**)",
+      "Write(~/.ssh/**)"
+    ]
+  }
+}

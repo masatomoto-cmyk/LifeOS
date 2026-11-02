@@ -23,6 +23,8 @@ import json
 import os
 import re
 import select
+import stat
+import subprocess
 import sys
 import time
 import urllib.error
@@ -50,7 +52,22 @@ SECRET_PATTERNS = [
     r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.",
     r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*\S{6,}",
     r"(マイナンバー|個人番号|口座番号)\D{0,10}\d{4,}",
+    r"\bgsk_[A-Za-z0-9]{20,}",                      # Groq
+    r"\b[sr]k_(live|test)_[A-Za-z0-9]{16,}",        # Stripe
+    r"\bsbp_[0-9a-f]{40}\b",                         # Supabase のアクセストークン
+    r"\bsb_secret_[A-Za-z0-9_-]{20,}",               # Supabase の秘密キー
+    r"\bnpm_[A-Za-z0-9]{36}\b",                      # npm
+    r"\bya29\.[A-Za-z0-9_-]{20,}",                   # Google のアクセストークン
+    r"\bAAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]{20,}",     # X（Twitter）の Bearer トークン
+    r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{20,}",        # Authorization: Bearer <値>
+    r"(?i)qiita.{0,20}?\b[0-9a-f]{40}\b",            # Qiita のトークン
+    r"\b0[5789]0-\d{4}-\d{4}\b",                     # 携帯電話番号
 ]
+
+# メールアドレスが何件も並んでいるもの（利用者の一覧や書き出し）は送らない。見本や noreply は数えない
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}")
+EMAIL_IGNORE = re.compile(r"(?i)(@example\.(com|org|net|jp)$|@(users\.)?noreply\.|^noreply@|^no-reply@|@anthropic\.com$|@localhost)")
+EMAIL_LIMIT = 3
 
 
 def log(msg):
@@ -88,12 +105,39 @@ SENSITIVE_DIRS = {".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config"}
 SENSITIVE_NAMES = {".env", ".netrc", ".npmrc", ".pgpass", "id_rsa", "id_ed25519", "credentials"}
 
 
-def check_forbidden(paths, texts):
+def stdin_origins():
+    """標準入力の出どころ。`ds < ファイル` ならそのパス、`cat ファイル | ds` なら呼び出し元のコマンド。"""
+    out = []
+    try:
+        if stat.S_ISREG(os.fstat(0).st_mode):
+            if sys.platform == "darwin":
+                import fcntl
+                F_GETPATH = 50
+                out.append(fcntl.fcntl(0, F_GETPATH, b"\0" * 1024).split(b"\0")[0].decode("utf-8", "replace"))
+            elif os.path.exists("/proc/self/fd/0"):
+                out.append(os.readlink("/proc/self/fd/0"))
+    except OSError:
+        pass
+    # パイプのときは中身の出どころがわからないので、親のシェルのコマンドのうち ds を呼んでいる部分を見る
+    try:
+        r = subprocess.run(["ps", "-o", "args=", "-p", str(os.getppid())], capture_output=True, text=True, timeout=3)
+        for seg in re.split(r"\n|;|&&|\|\|", r.stdout):
+            if re.search(r"(^|[\s/'\"])ds(\s|$)", seg):
+                out.append(seg)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return out
+
+
+def check_forbidden(paths, texts, origins=()):
     # シンボリックリンクで 10_Life を迂回されないよう、実体のパスで調べる
     for p in [os.getcwd()] + [os.path.realpath(p) for p in paths]:
         parts = p.split(os.sep)
         if "10_Life" in parts:
             die(4, f"10_Life 配下は送れません: {p}")
+    for o in origins:
+        if "10_Life/" in o or o.endswith("10_Life"):
+            die(4, "10_Life 配下の中身は送れません（標準入力の出どころが 10_Life）")
     for p in (os.path.realpath(p) for p in paths):
         parts = p.split(os.sep)
         if SENSITIVE_DIRS & set(parts) or os.path.basename(p) in SENSITIVE_NAMES or os.path.basename(p).startswith(".env"):
@@ -102,6 +146,10 @@ def check_forbidden(paths, texts):
         for pat in SECRET_PATTERNS:
             if re.search(pat, t):
                 die(4, "秘密情報らしき内容が含まれるため送りません")
+    emails = {m.group(0).lower() for t in texts for m in EMAIL_RE.finditer(t)}
+    emails = {e for e in emails if not EMAIL_IGNORE.search(e)}
+    if len(emails) >= EMAIL_LIMIT:
+        die(4, f"メールアドレスが {len(emails)} 件含まれるため送りません（個人情報の一覧の可能性）")
 
 
 # 予備の AI（OpenAI 互換の chat/completions）。キーのファイルがあるものだけ使う
@@ -235,7 +283,8 @@ def main():
         except OSError as e:
             die(1, f"ファイルを読めません: {p} ({e.strerror})")
 
-    check_forbidden(paths, [instruction, stdin_text] + [b for _, b in files])
+    check_forbidden(paths, [instruction, stdin_text] + [b for _, b in files],
+                    stdin_origins() if stdin_text else ())
 
     message = build_message(instruction, files, stdin_text)
     errors = []

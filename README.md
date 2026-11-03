@@ -58,3 +58,4 @@
 - Vault は `30_Learning` と `40_Resources` だけにする（Obsidian で「フォルダを Vault として開く」）。`10_Life` は Vault に含めない・同期しない
 - 設定は各 Vault の `.obsidian/` に作られる。`.gitignore` で除外済み
 - コミュニティプラグインは最小限にし、導入元を確認する
+- Claude・NotebookLM との分担と流れは `40_Resources/42_マニュアル・手順書/Claude・NotebookLM・Obsidianの使い分け.md`。作業記録のテンプレートは `40_Resources/41_テンプレート/作業記録.md`

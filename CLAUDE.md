@@ -74,3 +74,11 @@ DeepSeek も GLM（Zhipu / Z.ai）も中国の企業で、送ったデータは�
 - 事前にユーザーに確認する: ノートブックや資料の削除、音声解説・スライドなどの生成、共有設定の変更（公開・招待）
 - 「DeepSeek に渡さないもの」は NotebookLM にもアップロードしない
 - 非公式ツールなので、動かなくなったら（認証切れ・仕様変更など）ユーザーに伝えて手動に切り替える
+
+## Obsidian（Vault: `30_Learning`・`40_Resources`）
+
+NotebookLM・Obsidian との分担は `40_Resources/42_マニュアル・手順書/Claude・NotebookLM・Obsidianの使い分け.md`。要点:
+- 作業の始めに、関係する Obsidian のノート（`30_Learning`・`40_Resources`）を読んで前提にする。分かったことで見返す価値のあるものは、新しいノートとして足し、`[[ ]]` で既存のノートにつなぐ
+- 既存ノートの本文は書き換えない（足すのは新規ノートか末尾の追記だけ）
+- 作業記録は `docs/YYYY-MM-DD_作業記録.md`（テンプレート: `40_Resources/41_テンプレート/作業記録.md`）に書き、NotebookLM に追加する
+- `10_Life` は Obsidian にも NotebookLM にも入れない
